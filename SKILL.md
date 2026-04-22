@@ -422,6 +422,4 @@ python3 scripts/playwright_iframe_demo.py
 
 ### 相关链接
 
-- [headed-browser-open-v2](../headed-browser-open-v2/SKILL.md) - V2版本（功能更完整）
-- [browser](../browser/SKILL.md) - 原生 browser skill（无头浏览器）
 - [Playwright 官方文档](https://playwright.dev/python/docs/api/class-framelocator)
