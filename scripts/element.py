@@ -33,6 +33,212 @@ def cdp_command(ws_url, method, params=None):
     ws.close()
     return json.loads(resp)
 
+def get_frame_tree(ws_url):
+    """获取页面的 Frame 树结构（包含所有 iframe）"""
+    result = cdp_command(ws_url, "Page.getFrameTree")
+    return result.get("result", {}).get("frameTree", {})
+
+def get_all_frames_content(ws_url):
+    """获取主页面和所有 iframe 的内容
+    
+    Returns:
+        {
+            "mainFrame": {...},
+            "frames": [
+                {"frameId": "...", "url": "...", "content": {...}},
+                ...
+            ]
+        }
+    """
+    # 获取 frame 树
+    frame_tree = get_frame_tree(ws_url)
+    main_frame = frame_tree.get("frame", {})
+    
+    result = {
+        "mainFrame": {
+            "id": main_frame.get("id"),
+            "url": main_frame.get("url"),
+            "title": ""
+        },
+        "frames": []
+    }
+    
+    # 获取主页面内容
+    main_content = get_playwright_snapshot(ws_url)
+    result["mainFrame"]["title"] = main_content.get("title", "")
+    result["mainFrame"]["content"] = main_content
+    
+    # 递归收集所有子 frame
+    def collect_frames(frame_node, parent_id=None):
+        frames = []
+        for child in frame_node.get("childFrames", []):
+            frame = child.get("frame", {})
+            frame_info = {
+                "frameId": frame.get("id"),
+                "parentId": parent_id,
+                "url": frame.get("url", ""),
+                "name": frame.get("name", ""),
+                "content": None
+            }
+            
+            # 尝试获取 iframe 内容
+            try:
+                iframe_content = get_iframe_content(ws_url, frame.get("id"))
+                frame_info["content"] = iframe_content
+            except Exception as e:
+                frame_info["error"] = str(e)
+            
+            frames.append(frame_info)
+            # 递归收集子 frame
+            frames.extend(collect_frames(child, frame.get("id")))
+        return frames
+    
+    result["frames"] = collect_frames(frame_tree)
+    return result
+
+def get_iframe_content(ws_url, frame_id):
+    """获取指定 iframe 的内容"""
+    import websocket
+    ws = websocket.create_connection(ws_url)
+    
+    try:
+        # 创建 frame 上下文
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Page.createIsolatedWorld",
+            "params": {"frameId": frame_id, "worldName": "skill_content_extractor"}
+        }))
+        resp = json.loads(ws.recv())
+        execution_context_id = resp.get("result", {}).get("executionContextId")
+        
+        if not execution_context_id:
+            return {"error": "无法创建 frame 上下文"}
+        
+        # 在 frame 中执行内容提取
+        ws.send(json.dumps({
+            "id": 2,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": """
+                    (function() {
+                        function extractContent() {
+                            const results = [];
+                            const elements = document.querySelectorAll('input, button, a, [role], textarea, select');
+                            
+                            elements.forEach(el => {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {
+                                    results.push({
+                                        tag: el.tagName,
+                                        role: el.getAttribute('role') || el.tagName.toLowerCase(),
+                                        name: el.getAttribute('aria-label') || 
+                                              el.getAttribute('placeholder') ||
+                                              el.getAttribute('title') ||
+                                              el.textContent?.trim().substring(0, 50) ||
+                                              el.value?.substring(0, 50) || '',
+                                        type: el.type || '',
+                                        x: Math.round(rect.left),
+                                        y: Math.round(rect.top),
+                                        width: Math.round(rect.width),
+                                        height: Math.round(rect.height),
+                                        centerX: Math.round(rect.left + rect.width/2),
+                                        centerY: Math.round(rect.top + rect.height/2)
+                                    });
+                                }
+                            });
+                            
+                            return {
+                                url: window.location.href,
+                                title: document.title,
+                                elements: results,
+                                textContent: document.body?.innerText?.substring(0, 500) || ''
+                            };
+                        }
+                        return extractContent();
+                    })()
+                """,
+                "contextId": execution_context_id,
+                "returnByValue": True
+            }
+        }))
+        resp = json.loads(ws.recv())
+        
+        result = resp.get("result", {}).get("result", {})
+        return result.get("value") if result.get("type") != "undefined" else {"error": "执行失败"}
+        
+    finally:
+        ws.close()
+
+def print_full_page_content(ws_url):
+    """打印完整页面内容（主页面 + 所有 iframe）"""
+    content = get_all_frames_content(ws_url)
+    
+    print("\n" + "="*70)
+    print("📄 完整页面内容分析")
+    print("="*70)
+    
+    # 主页面
+    main = content.get("mainFrame", {})
+    print(f"\n🌐 主页面: {main.get('title', 'Unknown')}")
+    print(f"   URL: {main.get('url', 'Unknown')}")
+    
+    main_content = main.get("content", {})
+    aria_tree = main_content.get("ariaTree", [])
+    dom_tree = main_content.get("domTree", [])
+    
+    if aria_tree:
+        print(f"\n   🌳 无障碍树: {len(aria_tree)} 个元素")
+        for i, el in enumerate(aria_tree[:8]):
+            role = el.get('role', 'unknown')
+            name = el.get('name', '')[:30]
+            print(f"      [{i+1}] [{role}] '{name}'")
+    
+    interactive = [e for e in dom_tree if e.get("role") in ["button", "link", "textbox", "searchbox", "input"]]
+    if interactive:
+        print(f"\n   🖱️  交互元素: {len(interactive)} 个")
+        for i, el in enumerate(interactive[:5]):
+            print(f"      [{i+1}] [{el.get('role')}] '{el.get('name', '')[:25]}'")
+    
+    # iframe 内容
+    frames = content.get("frames", [])
+    if frames:
+        print(f"\n📦 发现 {len(frames)} 个 iframe:")
+        
+        for idx, frame in enumerate(frames, 1):
+            print(f"\n   ┌─ iframe [{idx}] {frame.get('name') or 'unnamed'}")
+            print(f"   │  URL: {frame.get('url', 'Unknown')[:60]}")
+            
+            if frame.get("error"):
+                print(f"   │  ⚠️  无法访问: {frame.get('error')}")
+                continue
+            
+            frame_content = frame.get("content", {})
+            if frame_content:
+                title = frame_content.get("title", "")
+                elements = frame_content.get("elements", [])
+                text_preview = frame_content.get("textContent", "")[:80]
+                
+                if title:
+                    print(f"   │  标题: {title}")
+                if text_preview:
+                    print(f"   │  内容: {text_preview}...")
+                if elements:
+                    print(f"   │  元素: {len(elements)} 个")
+                    # 显示关键交互元素
+                    key_elements = [e for e in elements if e.get("tag") in ["INPUT", "BUTTON", "A"]]
+                    for i, el in enumerate(key_elements[:4]):
+                        tag = el.get("tag", "")
+                        name = el.get("name", "")[:20]
+                        el_type = el.get("type", "")
+                        info = f"{tag}" + (f"[{el_type}]" if el_type else "")
+                        print(f"   │    [{i+1}] {info}: '{name}'")
+                    if len(key_elements) > 4:
+                        print(f"   │    ... 还有 {len(key_elements) - 4} 个")
+            print(f"   └─")
+    
+    print("\n" + "="*70)
+    return content
+
 def get_playwright_snapshot(ws_url):
     """获取 Playwright 格式的页面快照（DOM树 + 无障碍树）"""
     result = cdp_command(ws_url, "Runtime.evaluate", {
@@ -428,6 +634,7 @@ def main():
     parser.add_argument("--screenshot", help="截图保存路径")
     parser.add_argument("--display", type=int, default=99, help="Xvfb显示号")
     parser.add_argument("--snapshot", action="store_true", help="打印Playwright风格的页面快照")
+    parser.add_argument("--full-content", action="store_true", help="打印完整页面内容（主页面 + 所有iframe）")
     
     args = parser.parse_args()
     
@@ -438,7 +645,9 @@ def main():
         sys.exit(1)
     
     # 执行操作
-    if args.snapshot:
+    if args.full_content:
+        print_full_page_content(ws_url)
+    elif args.snapshot:
         print_snapshot(ws_url)
     
     if args.find:

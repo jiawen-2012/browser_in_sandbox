@@ -114,6 +114,8 @@ Skill 根目录 = 当前文件路径的父目录
 | `--js-click` | 使用JavaScript点击（绕过反爬） | `--click-text "登录" --js-click` |
 | `--type TEXT` | 在当前焦点元素输入文本 | `--type "13800138000"` |
 | `--screenshot PATH` | 截图保存 | `--screenshot /tmp/page.png` |
+| `--snapshot` | 打印 Playwright 风格页面快照 | `--snapshot` |
+| `--full-content` | 打印完整内容（主页面+所有iframe） | `--full-content` |
 
 **点击失败处理：**
 1. 告知用户"点击失败，尝试使用JavaScript点击..."
@@ -225,6 +227,113 @@ element.py --click 100 200
 
 # 操作后截图
 element.py --screenshot /tmp/after.png
+```
+
+---
+
+## 页面内容识别
+
+### 为什么需要同时获取主页面和 iframe 内容？
+
+现代网站广泛使用 iframe 来隔离内容（如登录框、支付表单、第三方嵌入）。仅查看主页面内容会遗漏关键信息：
+
+| 场景 | 主页面可见 | iframe 内容 | 示例 |
+|------|-----------|-------------|------|
+| 163 邮箱登录 | 空白或提示 | 完整的登录表单 | 登录 iframe |
+| 小红书授权 | 授权按钮 | 授权详情和确认 | 第三方登录 |
+| 支付页面 | 订单信息 | 支付密码输入 | 支付 iframe |
+
+### 获取完整页面内容
+
+使用 `--full-content` 参数同时获取主页面和所有 iframe 的内容：
+
+```bash
+~/.openclaw/workspace/skills/headed-browser-open-v3/scripts/element.py --full-content
+```
+
+**输出示例：**
+
+```
+======================================================================
+📄 完整页面内容分析
+======================================================================
+
+🌐 主页面: 示例网站
+   URL: https://example.com
+
+   🌳 无障碍树: 15 个元素
+      [1] [heading] '欢迎登录'
+      [2] [textbox] '请输入手机号'
+      [3] [button] '获取验证码'
+
+📦 发现 2 个 iframe:
+
+   ┌─ iframe [1] login-frame
+   │  URL: https://login.example.com/form
+   │  标题: 安全登录
+   │  内容: 请输入您的账号和密码...
+   │  元素: 5 个
+   │    [1] INPUT[text]: '邮箱/手机号'
+   │    [2] INPUT[password]: '密码'
+   │    [3] BUTTON: '登录'
+   │    [4] A: '忘记密码'
+   └─
+
+   ┌─ iframe [2] captcha-frame
+   │  URL: https://captcha.example.com/verify
+   │  ⚠️  无法访问: 跨域限制
+   └─
+
+======================================================================
+```
+
+### 页面快照对比
+
+| 参数 | 用途 | 适用场景 |
+|------|------|---------|
+| `--snapshot` | Playwright 风格快照（主页面无障碍树） | 快速查看主页面结构 |
+| `--full-content` | 主页面 + 所有 iframe 完整内容 | 识别登录框、嵌套表单 |
+| `--find TEXT` | 搜索特定元素 | 定位已知元素 |
+
+### 推荐识别流程
+
+```bash
+# 1. 首先获取完整页面内容（主页面 + iframe）
+element.py --full-content
+
+# 2. 根据识别结果，如有 iframe 需要操作
+element_iframe.py --list-frames
+element_iframe.py --iframe "login" --find-elements
+
+# 3. 执行操作
+element_iframe.py --iframe "login" --click-text "登录"
+
+# 4. 截图确认
+element.py --screenshot /tmp/result.png
+```
+
+### 163 邮箱登录示例
+
+```bash
+# 1. 打开 163 邮箱
+browser.sh start "https://mail.163.com" &
+sleep 3
+
+# 2. 获取完整内容（发现登录在 iframe 中）
+element.py --full-content
+# 输出显示：
+# 📦 发现 3 个 iframe:
+#    ┌─ iframe [3] x-URS-iframe...
+#    │  URL: https://dl.reg.163.com/...
+#    │  元素: INPUT[text]: '邮箱/手机号'
+#    │         INPUT[password]: '密码'
+#    │         BUTTON: '登录'
+
+# 3. 在 iframe 中输入账号
+element_iframe.py --iframe "x-URS" --type "your_email@163.com"
+
+# 4. 点击登录
+element_iframe.py --iframe "x-URS" --click-text "登录"
 ```
 
 ---
